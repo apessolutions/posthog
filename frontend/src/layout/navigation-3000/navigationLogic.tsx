@@ -516,13 +516,13 @@ export const navigation3000Logic = kea<navigation3000LogicType>([
                                 },
                             },
                         },
-                        {
-                            identifier: Scene.FeatureFlags,
-                            label: 'Feature flags',
-                            icon: <IconToggle />,
-                            to: urls.featureFlags(),
-                            tooltipDocLink: 'https://posthog.com/docs/feature-flags/creating-feature-flags',
-                        },
+                        // {
+                        //     identifier: Scene.FeatureFlags,
+                        //     label: 'Feature flags',
+                        //     icon: <IconToggle />,
+                        //     to: urls.featureFlags(),
+                        //     tooltipDocLink: 'https://posthog.com/docs/feature-flags/creating-feature-flags',
+                        // },
                         {
                             identifier: Scene.Experiments,
                             label: 'Experiments',
