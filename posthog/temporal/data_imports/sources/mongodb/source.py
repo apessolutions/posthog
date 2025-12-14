@@ -31,7 +31,7 @@ class MongoDBSource(SimpleSource[MongoDBSourceConfig], ValidateDatabaseHostMixin
         return ExternalDataSourceType.MONGODB
 
     def get_non_retryable_errors(self) -> dict[str, str | None]:
-        return {"The DNS query name does not exist": None, "authentication failed": None}
+        return {"The DNS query name does not exist": None, "authentication failed": None, "SSL handshake failed": None}
 
     def get_schemas(self, config: MongoDBSourceConfig, team_id: int, with_counts: bool = False) -> list[SourceSchema]:
         mongo_schemas = get_mongo_schemas(config)
@@ -116,7 +116,7 @@ class MongoDBSource(SimpleSource[MongoDBSourceConfig], ValidateDatabaseHostMixin
                         label="Connection String",
                         type=SourceFieldInputConfigType.TEXT,
                         required=True,
-                        placeholder="mongodb://username:password@host:port/database?authSource=admin",
+                        placeholder="mongodb://username:password@host:port/database?authSource=admin&tls=true",
                     )
                 ],
             ),

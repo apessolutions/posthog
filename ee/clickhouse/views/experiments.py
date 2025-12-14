@@ -40,6 +40,8 @@ from posthog.rbac.access_control_api_mixin import AccessControlViewSetMixin
 from posthog.rbac.user_access_control import UserAccessControlSerializerMixin
 from posthog.utils import str_to_bool
 
+from products.product_tours.backend.models import ProductTour
+
 from ee.clickhouse.queries.experiments.utils import requires_flag_warning
 from ee.clickhouse.views.experiment_holdouts import ExperimentHoldoutSerializer
 from ee.clickhouse.views.experiment_saved_metrics import ExperimentToSavedMetricSerializer
@@ -159,10 +161,12 @@ class ExperimentSerializer(UserAccessControlSerializerMixin, serializers.ModelSe
             if "metadata" in saved_metric and "type" not in saved_metric["metadata"]:
                 raise ValidationError("Metadata must have a type key")
 
-        # check if all saved metrics exist
-        saved_metrics = ExperimentSavedMetric.objects.filter(id__in=[saved_metric["id"] for saved_metric in value])
+        # check if all saved metrics exist and belong to the same team
+        saved_metrics = ExperimentSavedMetric.objects.filter(
+            id__in=[saved_metric["id"] for saved_metric in value], team_id=self.context["team_id"]
+        )
         if saved_metrics.count() != len(value):
-            raise ValidationError("Saved metric does not exist")
+            raise ValidationError("Saved metric does not exist or does not belong to this project")
 
         return value
 
@@ -621,6 +625,16 @@ class EnterpriseExperimentsViewSet(
         # Allow overriding the feature flag key from the request
         feature_flag_key = request.data.get("feature_flag_key", source_experiment.feature_flag.key)
 
+        # Check if the feature flag key refers to an existing flag with different variants
+        # If so, we need to update parameters.feature_flag_variants to match the new flag
+        parameters = deepcopy(source_experiment.parameters) or {}
+        if feature_flag_key != source_experiment.feature_flag.key:
+            existing_flag = FeatureFlag.objects.filter(
+                key=feature_flag_key, team_id=self.team_id, deleted=False
+            ).first()
+            if existing_flag and existing_flag.filters.get("multivariate", {}).get("variants"):
+                parameters["feature_flag_variants"] = existing_flag.filters["multivariate"]["variants"]
+
         # Generate a unique name for the duplicate
         base_name = f"{source_experiment.name} (Copy)"
         duplicate_name = base_name
@@ -644,7 +658,7 @@ class EnterpriseExperimentsViewSet(
             "name": duplicate_name,
             "description": source_experiment.description,
             "type": source_experiment.type,
-            "parameters": source_experiment.parameters,
+            "parameters": parameters,
             "filters": source_experiment.filters,
             "metrics": source_experiment.metrics,
             "metrics_secondary": source_experiment.metrics_secondary,
@@ -776,6 +790,7 @@ class EnterpriseExperimentsViewSet(
         - created_by_id: Filter by creator user ID
         - order: Sort order field
         - evaluation_runtime: Filter by evaluation runtime
+        - has_evaluation_tags: Filter by presence of evaluation tags ("true" or "false")
         """
         # validate limit and offset
         try:
@@ -803,7 +818,14 @@ class EnterpriseExperimentsViewSet(
         survey_internal_targeting_flags = Survey.objects.filter(
             team__project_id=self.project_id, internal_targeting_flag__isnull=False
         ).values_list("internal_targeting_flag_id", flat=True)
-        excluded_flag_ids = set(survey_targeting_flags) | set(survey_internal_targeting_flags)
+        product_tour_internal_targeting_flags = ProductTour.all_objects.filter(
+            team__project_id=self.project_id, internal_targeting_flag__isnull=False
+        ).values_list("internal_targeting_flag_id", flat=True)
+        excluded_flag_ids = (
+            set(survey_targeting_flags)
+            | set(survey_internal_targeting_flags)
+            | set(product_tour_internal_targeting_flags)
+        )
         queryset = queryset.exclude(id__in=excluded_flag_ids)
 
         # Apply search filter
@@ -825,6 +847,18 @@ class EnterpriseExperimentsViewSet(
         evaluation_runtime = request.query_params.get("evaluation_runtime")
         if evaluation_runtime:
             queryset = queryset.filter(evaluation_runtime=evaluation_runtime)
+
+        # Apply has_evaluation_tags filter
+        has_evaluation_tags = request.query_params.get("has_evaluation_tags")
+        if has_evaluation_tags is not None:
+            from django.db.models import Count
+
+            filter_value = has_evaluation_tags.lower() in ("true", "1", "yes")
+            queryset = queryset.annotate(eval_tag_count=Count("evaluation_tags"))
+            if filter_value:
+                queryset = queryset.filter(eval_tag_count__gt=0)
+            else:
+                queryset = queryset.filter(eval_tag_count=0)
 
         # Ordering
         order = request.query_params.get("order")
@@ -919,10 +953,16 @@ class EnterpriseExperimentsViewSet(
         latest_completed_at = None
 
         # Create mapping from query_to to result, deriving the day in project timezone
+        # Note: query_to is the EXCLUSIVE end of the time range
+        # Example: Data for 2025-11-09 has query_to = 2025-11-10T00:00:00 (recalculation)
+        #          or query_to = 2025-11-09T02:00:00 (regular DAG)
+        # To find which day the data represents, subtract 1 microsecond to get the last included moment
         results_by_date = {}
         for result in metric_results:
-            # Convert UTC query_to to project timezone to determine which day this result belongs to
-            day_in_project_tz = result.query_to.astimezone(project_tz).date()
+            # Subtract 1 microsecond to convert exclusive boundary to inclusive
+            query_to_adjusted = result.query_to - timedelta(microseconds=1)
+            query_to_in_project_tz = query_to_adjusted.astimezone(project_tz)
+            day_in_project_tz = query_to_in_project_tz.date()
             results_by_date[day_in_project_tz] = result
 
         for experiment_date in experiment_dates:
